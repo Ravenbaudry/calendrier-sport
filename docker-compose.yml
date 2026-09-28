@@ -1,0 +1,68 @@
+# =============================================================================
+# Calendrier Sport — déploiement Docker Compose (conteneur LXC Proxmox)
+#   cp .env.example .env   # puis remplir les secrets
+#   docker compose up -d --build
+# Seul le service « web » publie un port ; l'API et la base restent internes.
+# =============================================================================
+name: calendrier-sport
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-calendrier}
+      POSTGRES_USER: ${POSTGRES_USER:-calendrier}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Définis POSTGRES_PASSWORD dans .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Schéma + catalogue d'exercices, exécutés au premier démarrage uniquement
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [backend]
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Variables PG* standard : pas de problème d'échappement du mot de passe
+      PGHOST: db
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-calendrier}
+      PGUSER: ${POSTGRES_USER:-calendrier}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?Définis JWT_SECRET dans .env (openssl rand -hex 32)}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-30d}
+      INVITE_CODE: ${INVITE_CODE:-}
+      TZ: ${TZ:-Europe/Paris}
+    networks: [backend, frontend]
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      # BIND_ADDRESS : 127.0.0.1 derrière « tailscale serve », IP VPN, ou 0.0.0.0
+      - "${BIND_ADDRESS:-0.0.0.0}:${APP_PORT:-8080}:80"
+    networks: [frontend]
+
+volumes:
+  pgdata:
+
+networks:
+  # Réseau interne : la base n'est joignable que par l'API
+  backend:
+    internal: true
+  frontend:
